@@ -1,24 +1,25 @@
-FROM ghcr.io/android/gradle:7.6.2-jdk17
+FROM bitriseio/android-sdk:latest
 
 WORKDIR /app
 
-ENV GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx512m -Dorg.gradle.daemon=false"
+ENV GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx1024m -Dorg.gradle.daemon=false"
 
-# Install Python & unzip utilities
 USER root
-RUN apt-get update && apt-get install -y python3-pip zip unzip \
+
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    zip \
+    unzip \
     && python3 -m pip install --upgrade pip
 
-# Copy Python dependencies
 COPY requirements.txt .
 RUN python3 -m pip install -r requirements.txt
 
-# Copy project files
 COPY . .
 
-# Make gradlew executable if it exists
 RUN if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
 
 EXPOSE 10000
 
-CMD ["python3", "main.py"]
+CMD ["python3", "app.py"]
