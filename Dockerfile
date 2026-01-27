@@ -1,11 +1,14 @@
-FROM mingchen/android-build-box:latest
+# Use a working Android SDK + Gradle image
+FROM circleci/android:api-30
 
+# Set working directory
 WORKDIR /app
 
-# Gradle memory options
+# Gradle options to avoid memory issues
 ENV GRADLE_OPTS="-Dorg.gradle.jvmargs=-Xmx512m -Dorg.gradle.daemon=false"
 
-# Install Python & tools
+# Install Python and utilities
+USER root
 RUN apt-get update && apt-get install -y python3-pip zip unzip \
     && python3 -m pip install --upgrade pip
 
@@ -22,5 +25,5 @@ RUN if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
 # Expose Flask port
 EXPOSE 10000
 
-# Start Flask
+# Run the Flask app
 CMD ["python3", "main.py"]
