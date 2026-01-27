@@ -1,4 +1,4 @@
-FROM bitriseio/android-sdk:latest
+FROM bitriseio/android-sdk:33
 
 WORKDIR /app
 
