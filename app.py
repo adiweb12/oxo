@@ -1,51 +1,88 @@
 import os
-import subprocess
-import shutil
-import zipfile
-from flask import Flask, request, send_file, jsonify
+from fastapi import FastAPI, Request, Form
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import HTMLResponse
+import psycopg2
+from google import genai
+from google.genai import types
 
-app = Flask(__name__)
-BUILD_DIR = "/tmp/android_build"
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
 
-@app.route('/build', methods=['POST'])
-def build_apk():
-    try:
-        if 'file' not in request.files:
-            return jsonify({"error": "No file uploaded"}), 400
+# Configuration
+API_KEY = os.environ.get("GEMINI_API_KEY")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+client = genai.Client(api_key=API_KEY)
 
-        # Clean workspace
-        if os.path.exists(BUILD_DIR):
-            shutil.rmtree(BUILD_DIR)
-        os.makedirs(BUILD_DIR)
-
-        # Save and extract project
-        zip_path = os.path.join(BUILD_DIR, "project.zip")
-        request.files['file'].save(zip_path)
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(BUILD_DIR)
-
-        # Make gradlew executable
-        gradlew = os.path.join(BUILD_DIR, "gradlew")
-        if os.path.exists(gradlew):
-            os.chmod(gradlew, 0o755)
-
-        # BUILD THE APK
-        process = subprocess.run(
-            ["./gradlew", "assembleDebug"], 
-            cwd=BUILD_DIR, 
-            capture_output=True, 
-            text=True
+# Initialize Database
+def init_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id SERIAL PRIMARY KEY,
+            role TEXT,
+            content TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
-        if process.returncode != 0:
-            return jsonify({"error": "Build failed", "details": process.stderr}), 500
+init_db()
 
-        # Find the APK (standard path)
-        apk_path = os.path.join(BUILD_DIR, "app/build/outputs/apk/debug/app-debug.apk")
-        return send_file(apk_path, as_attachment=True)
+def get_fallback_response(user_input, history):
+    # Models ordered by preference
+    models = ["gemini-3-flash", "gemini-2.5-flash", "gemini-2.5-lite", "gemini-1.5-flash"]
+    
+    formatted_history = [{"role": r, "parts": [{"text": c}]} for r, c in history]
+    
+    for model_name in models:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=formatted_history + [{"role": "user", "parts": [{"text": user_input}]}],
+                config=types.GenerateContentConfig(
+                    system_instruction="You are a professional senior coder. Fix bugs, optimize, and document the code provided."
+                )
+            )
+            return response.text, model_name
+        except Exception as e:
+            print(f"Skipping {model_name} due to error: {e}")
+            continue
+    return "Error: All models failed.", "None"
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request, "history": []})
 
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=10000)
+@app.post("/process", response_class=HTMLResponse)
+async def process_code(request: Request, user_code: str = Form(...)):
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+
+    # 1. Fetch Permanent Memory
+    cur.execute("SELECT role, content FROM chat_history ORDER BY created_at ASC")
+    history = cur.fetchall()
+
+    # 2. Get AI Response via Fallback
+    ai_response, model_used = get_fallback_response(user_code, history)
+
+    # 3. Save to Permanent Memory
+    cur.execute("INSERT INTO chat_history (role, content) VALUES (%s, %s)", ("user", user_code))
+    cur.execute("INSERT INTO chat_history (role, content) VALUES (%s, %s)", ("model", ai_response))
+    conn.commit()
+    
+    # 4. Fetch updated history to show on UI
+    cur.execute("SELECT role, content FROM chat_history ORDER BY created_at ASC")
+    updated_history = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+
+    return templates.TemplateResponse("index.html", {
+        "request": request, 
+        "history": updated_history,
+        "model_used": model_used
+    })
